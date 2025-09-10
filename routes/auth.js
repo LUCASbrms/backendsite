@@ -1,75 +1,70 @@
+// Importações necessárias
 const express = require('express');
-const router = express.Router();
-const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
-const User = require('../models/User'); // Importa o modelo que criamos
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg'); // Exemplo usando o 'pg'
+const salt = await bcrypt.genSalt(10);
+const senhaHash = await bcrypt.hash(senhaDoUsuario, salt);
+// Salve a 'senhaHash' no banco de dados, e não a 'senhaDoUsuario'
 
-// ROTA: /api/auth/forgot-password
-router.post('/forgot-password', async (req, res) => {
-  try {
-    const user = await User.findOne({ email: req.body.email });
+const router = express.Router();
 
-    if (!user) {
-      return res.status(200).json({ message: 'Se um usuário com este e-mail existir, um link de recuperação foi enviado.' });
-    }
-
-    const token = crypto.randomBytes(20).toString('hex');
-    user.resetPasswordToken = token;
-    user.resetPasswordExpires = Date.now() + 3600000; // Expira em 1 hora
-    await user.save();
-
-    // --- Configuração do Nodemailer ---
-    // ATENÇÃO: Substitua com suas credenciais de e-mail reais
-    // É altamente recomendável usar variáveis de ambiente (.env) para isso
-    const transporter = nodemailer.createTransport({
-      service: 'Gmail', // Ex: Gmail, Outlook, etc.
-      auth: {
-        user: 'seu-email@gmail.com', // SEU E-MAIL
-        pass: 'sua-senha-de-app-do-email', // SUA SENHA DE APP (não a senha normal)
-      },
-    });
-
-    const mailOptions = {
-      from: 'seu-email@gmail.com',
-      to: user.email,
-      subject: 'Recuperação de Senha',
-      text: `Você solicitou a redefinição de senha.\n\n
-             Clique no link a seguir para completar o processo:\n\n
-             http://localhost:5173/resetar-senha/${token}\n\n
-             Se você não solicitou isso, ignore este e-mail.\n`,
-    };
-
-    await transporter.sendMail(mailOptions);
-    res.status(200).json({ message: 'E-mail de recuperação enviado.' });
-  } catch (error) {
-    console.error('Erro em forgot-password:', error);
-    res.status(500).json({ message: 'Erro no servidor' });
-  }
+// Configuração da conexão com o PostgreSQL
+// (Idealmente, isso vem de variáveis de ambiente)
+const pool = new Pool({
+  user: 'seu_usuario',
+  host: 'localhost',
+  database: 'seu_banco',
+  password: 'sua_senha',
+  port: 5432,
 });
 
-// ROTA: /api/auth/reset-password/:token
-router.post('/reset-password/:token', async (req, res) => {
+// Rota de Login: POST /api/login
+router.post('/login', async (req, res) => {
   try {
-    const user = await User.findOne({
-      resetPasswordToken: req.params.token,
-      resetPasswordExpires: { $gt: Date.now() },
-    });
+    const { email, senha } = req.body;
 
-    if (!user) {
-      return res.status(400).json({ message: 'Token de recuperação inválido ou expirado.' });
+    // 1. Validação básica dos dados de entrada
+    if (!email || !senha) {
+      return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
     }
 
-    const hashedPassword = await bcrypt.hash(req.body.password, 10);
-    user.password = hashedPassword;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-    await user.save();
+    // 2. Buscar o usuário no banco de dados pelo email
+    const userQuery = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
+    
+    if (userQuery.rows.length === 0) {
+      // Se não encontrou nenhum usuário com esse email
+      return res.status(404).json({ message: 'Credenciais inválidas.' }); // Mensagem genérica por segurança
+    }
 
-    res.status(200).json({ message: 'Senha alterada com sucesso.' });
+    const user = userQuery.rows[0];
+
+    // 3. Comparar a senha enviada com a senha hash salva no banco
+    // A senha no banco DEVE estar com hash (ex: user.senha_hash)
+    const isPasswordMatch = await bcrypt.compare(senha, user.senha_hash);
+
+    if (!isPasswordMatch) {
+      // Se as senhas não batem
+      return res.status(401).json({ message: 'Credenciais inválidas.' }); // Mensagem genérica por segurança
+    }
+
+    // 4. Se tudo deu certo, gerar o token JWT
+    const token = jwt.sign(
+      { userId: user.id, email: user.email }, // Informações que você quer guardar no token (payload)
+      'SEU_SEGREDO_SUPER_SECRETO_DO_JWT',       // Chave secreta (deve vir de uma variável de ambiente)
+      { expiresIn: '1h' }                     // Tempo de expiração do token
+    );
+
+    // 5. Enviar o token de volta para o cliente
+    res.status(200).json({
+      message: 'Login realizado com sucesso!',
+      token: token,
+      userId: user.id
+    });
+
   } catch (error) {
-    console.error('Erro em reset-password:', error);
-    res.status(500).json({ message: 'Erro no servidor' });
+    console.error('Erro no login:', error);
+    res.status(500).json({ message: 'Ocorreu um erro no servidor.' });
   }
 });
 
